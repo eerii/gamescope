@@ -596,6 +596,30 @@ static void handle_wl_surface_destroy( struct wl_listener *l, void *data )
 		wlserver_x11_surface_info_init(x11_surface, x11_surface->xwayland_server, x11_surface->x11_id);
 	}
 
+	if ( surf->xdg_surface )
+	{
+		struct wlserver_xdg_surface_info *info = surf->xdg_surface;
+
+		info->xdg_surface = nullptr;
+		info->main_surface = nullptr;
+		info->win = nullptr;
+		info->layer_surface = nullptr;
+		info->mapped = false;
+
+		{
+			std::unique_lock lock( g_wlserver_xdg_shell_windows_lock );
+			std::erase_if( wlserver.xdg_wins,
+				[=]( auto win ) { return win.get() == info->win; } );
+		}
+		wlserver.xdg_dirty = true;
+
+		wl_list_remove( &info->map.link );
+		wl_list_remove( &info->unmap.link );
+		wl_list_remove( &info->destroy.link );
+
+		surf->xdg_surface = nullptr;
+	}
+
 	if ( surf->wlr == wlserver.mouse_focus_surface )
 		wlserver.mouse_focus_surface = nullptr;
 
@@ -1871,20 +1895,27 @@ static void waylandy_surface_destroy(struct wl_listener *listener, void *data) {
 	struct wlserver_xdg_surface_info* info =
 		wl_container_of(listener, info, destroy);
 
-	wlserver_wl_surface_info *wlserver_surface = get_wl_surface_info(info->main_surface);
-	if (!wlserver_surface)
-	{
-		wl_log.infof("No base surface info. (destroy)");
-		return;
+	info->xdg_surface = nullptr;
+
+	if (info->main_surface) {
+		if (wlserver.kb_focus_surface == info->main_surface)
+			wlserver.kb_focus_surface = nullptr;
+		if (wlserver.mouse_focus_surface == info->main_surface)
+			wlserver.mouse_focus_surface = nullptr;
 	}
+
+	wlserver_wl_surface_info *wlserver_surface = nullptr;
+	if (info->main_surface)
+		wlserver_surface = get_wl_surface_info(info->main_surface);
 
 	{
 		std::unique_lock lock(g_wlserver_xdg_shell_windows_lock);
 		std::erase_if(wlserver.xdg_wins, [=](auto win) { return win.get() == info->win; });
 	}
+	wlserver.xdg_dirty = true;
+
 	info->main_surface = nullptr;
 	info->win = nullptr;
-	info->xdg_surface = nullptr;
 	info->layer_surface = nullptr;
 	info->mapped = false;
 
@@ -1892,7 +1923,8 @@ static void waylandy_surface_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&info->unmap.link);
 	wl_list_remove(&info->destroy.link);
 
-	wlserver_surface->xdg_surface = nullptr;
+	if (wlserver_surface)
+		wlserver_surface->xdg_surface = nullptr;
 }
 
 void xdg_toplevel_new(struct wl_listener *listener, void *data)
@@ -2340,13 +2372,23 @@ void wlserver_keyboardfocus( struct wlr_surface *surface, bool bConstrain )
 	assert( wlserver_is_lock_held() );
 
 	if (wlserver.kb_focus_surface != surface) {
-		auto old_wl_surf = get_wl_surface_info( wlserver.kb_focus_surface );
-		if (old_wl_surf && old_wl_surf->xdg_surface && old_wl_surf->xdg_surface->xdg_surface && old_wl_surf->xdg_surface->xdg_surface->toplevel)
-			wlr_xdg_toplevel_set_activated(old_wl_surf->xdg_surface->xdg_surface->toplevel, false);
+		if ( wlserver.kb_focus_surface ) {
+			wlserver_wl_surface_info *wl_surf = get_wl_surface_info( wlserver.kb_focus_surface );
+			if ( wl_surf && wl_surf->xdg_surface ) {
+				struct wlr_xdg_surface *old_xdg = wlr_xdg_surface_try_from_wlr_surface( wlserver.kb_focus_surface );
+				if ( old_xdg && old_xdg->toplevel )
+					wlr_xdg_toplevel_set_activated( old_xdg->toplevel, false );
+			}
+		}
 
-		auto new_wl_surf = get_wl_surface_info( surface );
-		if (new_wl_surf && new_wl_surf->xdg_surface && new_wl_surf->xdg_surface->xdg_surface && new_wl_surf->xdg_surface->xdg_surface->toplevel)
-			wlr_xdg_toplevel_set_activated(new_wl_surf->xdg_surface->xdg_surface->toplevel, true);
+		if ( surface ) {
+			wlserver_wl_surface_info *wl_surf = get_wl_surface_info( surface );
+			if ( wl_surf && wl_surf->xdg_surface ) {
+				struct wlr_xdg_surface *new_xdg = wlr_xdg_surface_try_from_wlr_surface( surface );
+				if ( new_xdg && new_xdg->toplevel )
+					wlr_xdg_toplevel_set_activated( new_xdg->toplevel, true );
+			}
+		}
 	}
 
 	assert( wlserver.wlr.virtual_keyboard_device != nullptr );
