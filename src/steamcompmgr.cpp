@@ -1100,6 +1100,7 @@ uint32_t		currentOutputRotation = 0;
 bool			currentHDROutput = false;
 bool			currentHDRCapable = false;
 bool			currentHDRForce = false;
+bool			currentHDRExpose = false;
 
 std::vector< uint32_t > vecFocuscontrolAppIDs;
 
@@ -1835,6 +1836,7 @@ import_commit (
 
 	commit->win_seq = w->seq;
 	commit->surf = surf;
+	commit->surfaceColorspace = wlserver_surface_hdr_colorspace( surf );
 	commit->buf = buf;
 	commit->async = async;
 	commit->fifo = fifo;
@@ -2704,7 +2706,10 @@ static void paint_surface_layer( struct wlr_surface *surface, int x, int y,
 	layer->tex = pTex;
 	layer->filter = parentLayer->filter;
 
-	if ( pTex->isYcbcr() )
+	if ( std::optional<GamescopeAppTextureColorspace> hdrColorspace =
+	         wlserver_surface_hdr_colorspace( surface ) )
+		layer->colorspace = *hdrColorspace;
+	else if ( pTex->isYcbcr() )
 		layer->colorspace = GAMESCOPE_APP_TEXTURE_COLORSPACE_PASSTHRU;
 	else
 		layer->colorspace = VkColorSpaceToGamescopeAppTextureColorSpace(
@@ -10506,6 +10511,10 @@ steamcompmgr_main(int argc, char **argv)
 		// state below, so games can request HDR while the panel is idling in SDR.
 		const bool bOutputHDRCapable = (g_bSupportsHDR_CachedValue || g_bForceHDR10OutputDebug) && cv_hdr_enabled;
 
+		gamescope::IBackendConnector *pExposeHDRConnector = GetBackend()->GetCurrentConnector();
+		const bool bExposeHDR = ( pExposeHDRConnector && pExposeHDRConnector->GetHDRInfo().bExposeHDRSupport )
+			|| g_bForceHDRSupportDebug || g_bForceHDR10OutputDebug;
+
 		{
 			gamescope::IBackendConnector *pConn = GetBackend()->GetCurrentConnector();
 			const bool bContentDriven = bOutputHDRCapable && !g_bForceHDR10OutputDebug &&
@@ -10543,7 +10552,8 @@ steamcompmgr_main(int argc, char **argv)
 			 currentOutputRotation != g_uOutputRotation ||
 			 currentHDROutput != g_bOutputHDREnabled ||
 			 currentHDRCapable != bOutputHDRCapable ||
-			 currentHDRForce != g_bForceHDRSupportDebug )
+			 currentHDRForce != g_bForceHDRSupportDebug ||
+			 currentHDRExpose != bExposeHDR )
 		{
 			if ( g_nXWaylandCount > 1 )
 			{
@@ -10567,6 +10577,9 @@ steamcompmgr_main(int argc, char **argv)
 				vulkan_remake_output_images();
 			}
 
+			wlserver_lock();
+			wlserver_set_hdr_output( bExposeHDR );
+			wlserver_unlock();
 
 			{
 				gamescope_xwayland_server_t *server = NULL;
@@ -10596,6 +10609,7 @@ steamcompmgr_main(int argc, char **argv)
 			currentHDROutput = g_bOutputHDREnabled;
 			currentHDRCapable = bOutputHDRCapable;
 			currentHDRForce = g_bForceHDRSupportDebug;
+			currentHDRExpose = bExposeHDR;
 
 #if HAVE_PIPEWIRE
 			nudge_pipewire();

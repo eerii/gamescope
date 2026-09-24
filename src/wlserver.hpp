@@ -32,6 +32,8 @@
 
 struct _XDisplay;
 struct xwayland_ctx_t;
+struct wlr_color_manager_v1;
+struct wlr_fractional_scale_manager_v1;
 
 struct GamescopeAcquireTimelineState
 {
@@ -63,6 +65,9 @@ struct NonToplevelCommit_t
 	std::vector<struct wl_resource*> presentation_feedbacks;
 	std::shared_ptr<gamescope::CReleaseTimelinePoint> pReleasePoint;
 };
+
+std::optional<GamescopeAppTextureColorspace> wlserver_surface_hdr_colorspace(struct wlr_surface *surface);
+void wlserver_set_hdr_output(bool aExposeHDR);
 
 struct wlserver_content_override;
 
@@ -145,6 +150,9 @@ struct wlserver_t {
 
 		std::vector<std::unique_ptr<gamescope_xwayland_server_t>> xwayland_servers;
 	} wlr;
+
+	struct wlr_color_manager_v1 *color_manager = nullptr;
+	struct wlr_fractional_scale_manager_v1 *fractional_scale_manager = nullptr;
 	
 	struct wlr_surface *mouse_focus_surface;
 	struct wlr_surface *kb_focus_surface;

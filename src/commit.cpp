@@ -34,6 +34,9 @@ commit_t::~commit_t()
 
 GamescopeAppTextureColorspace commit_t::colorspace() const
 {
+    if (surfaceColorspace)
+        return *surfaceColorspace;
+
     VkColorSpaceKHR colorspace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     if (feedback && vulkanTex)
         colorspace = feedback->vk_colorspace;

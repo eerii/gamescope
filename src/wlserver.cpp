@@ -47,6 +47,9 @@
 #include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_subcompositor.h>
+#include <wlr/types/wlr_linux_dmabuf_v1.h>
+#include <wlr/types/wlr_color_management_v1.h>
+#include <wlr/types/wlr_fractional_scale_v1.h>
 #include <wlr/util/region.h>
 #include "wlr_end.hpp"
 
@@ -747,6 +750,64 @@ static void handle_wl_surface_destroy( struct wl_listener *l, void *data )
 	delete surf;
 }
 
+std::optional<GamescopeAppTextureColorspace>
+wlserver_surface_hdr_colorspace(struct wlr_surface *surface)
+{
+	if (!surface)
+		return std::nullopt;
+
+	const struct wlr_image_description_v1_data *desc =
+		wlr_surface_get_image_description_v1_data(surface);
+	if (!desc)
+		return std::nullopt;
+
+	if (desc->tf_named == WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ &&
+		desc->primaries_named == WP_COLOR_MANAGER_V1_PRIMARIES_BT2020)
+		return GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ;
+
+	if (desc->tf_named == WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_EXT_LINEAR &&
+		desc->primaries_named == WP_COLOR_MANAGER_V1_PRIMARIES_SRGB)
+		return GAMESCOPE_APP_TEXTURE_COLORSPACE_SCRGB;
+
+	return std::nullopt;
+}
+
+static void SetOutputHDRImageDescription( struct wlr_output *output,
+	struct wlr_output_state *state, bool aExposeHDR )
+{
+	if ( aExposeHDR )
+	{
+		output->supported_primaries |= WLR_COLOR_NAMED_PRIMARIES_BT2020;
+		output->supported_transfer_functions |= WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
+
+		struct wlr_output_image_description imageDesc = {};
+		imageDesc.primaries = WLR_COLOR_NAMED_PRIMARIES_BT2020;
+		imageDesc.transfer_function = WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ;
+		wlr_output_state_set_image_description( state, &imageDesc );
+	}
+	else
+	{
+		wlr_output_state_set_image_description( state, nullptr );
+	}
+
+	if ( !wlr_output_commit_state( output, state ) )
+		wl_log.errorf( "Failed to commit HDR image description" );
+}
+
+void wlserver_set_hdr_output( bool aExposeHDR )
+{
+	static bool s_bExposed = false;
+	if ( aExposeHDR == s_bExposed )
+		return;
+	s_bExposed = aExposeHDR;
+
+	for ( auto& server : wlserver.wlr.xwayland_servers )
+	{
+		if ( server && server->get_output() && server->get_output_state() )
+			SetOutputHDRImageDescription( server->get_output(), server->get_output_state(), aExposeHDR );
+	}
+}
+
 static void wlserver_new_surface(struct wl_listener *l, void *data)
 {
 	struct wlr_surface *wlr_surf = (struct wlr_surface *)data;
@@ -762,6 +823,9 @@ static void wlserver_new_surface(struct wl_listener *l, void *data)
 	wl_signal_add( &wlr_surf->events.commit, &wl_surface_info->commit );
 
 	wlr_surf->data = wl_surface_info;
+
+	if ( wlserver.fractional_scale_manager )
+		wlr_fractional_scale_v1_notify_scale( wlr_surf, 1.0 );
 
 	struct wlserver_x11_surface_info *s, *tmp;
 	wl_list_for_each_safe(s, tmp, &pending_surfaces, pending_link)
@@ -1972,6 +2036,10 @@ gamescope_xwayland_server_t::gamescope_xwayland_server_t(wl_display *display, in
 		abort();
 	}
 
+	if ( gamescope::IBackendConnector *pConn = GetBackend()->GetCurrentConnector() )
+		if ( pConn->GetHDRInfo().bExposeHDRSupport )
+			SetOutputHDRImageDescription( output, output_state, true );
+
 	update_output_info();
 
 	wlr_output_create_global(output, wlserver.display);
@@ -2300,9 +2368,44 @@ bool wlserver_init( void ) {
 
 	create_presentation_time();
 
+	{
+		static const enum wp_color_manager_v1_render_intent kRenderIntents[] = {
+			WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL,
+		};
+		static const enum wp_color_manager_v1_transfer_function kTransferFunctions[] = {
+			WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ,
+			WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_EXT_LINEAR,
+			WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22,
+		};
+		static const enum wp_color_manager_v1_primaries kPrimaries[] = {
+			WP_COLOR_MANAGER_V1_PRIMARIES_SRGB,
+			WP_COLOR_MANAGER_V1_PRIMARIES_BT2020,
+		};
+
+		struct wlr_color_manager_v1_options colorOptions = {};
+		colorOptions.features.parametric = true;
+		colorOptions.render_intents = kRenderIntents;
+		colorOptions.render_intents_len = 1;
+		colorOptions.transfer_functions = kTransferFunctions;
+		colorOptions.transfer_functions_len = 3;
+		colorOptions.primaries = kPrimaries;
+		colorOptions.primaries_len = 2;
+
+		wlserver.color_manager = wlr_color_manager_v1_create( wlserver.display, 1, &colorOptions );
+		if ( !wlserver.color_manager )
+			wl_log.errorf( "Failed to create color manager" );
+
+		wlserver.fractional_scale_manager = wlr_fractional_scale_manager_v1_create( wlserver.display, 1 );
+		if ( !wlserver.fractional_scale_manager )
+			wl_log.errorf( "Failed to create fractional scale manager" );
+	}
+
 	// Have to make this old ancient thing for compat with older XWayland.
 	// Someday, he will be purged.
 	wlr_drm_create(wlserver.display, wlserver.wlr.renderer);
+
+	if ( !wlr_linux_dmabuf_v1_create_with_renderer( wlserver.display, 4, wlserver.wlr.renderer ) )
+		wl_log.errorf( "Failed to create linux-dmabuf interface" );
 
 	if ( GetBackend()->SupportsExplicitSync() )
 	{
